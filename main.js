@@ -6,6 +6,11 @@ var SchemaCondition = require('./schema-condition');
 function Config(obj) {
 	this.table = obj.table;
 	this.columns = obj.columns;
+	this.keyColumns = obj.keyColumn ? [obj.keyColumn] : obj.keyColumns;
+	this.sortedColumns = Object.keys(this.columns);
+	this.sortedColumns.sort(function (a, b) {
+		return b.length - a.length; // longest first
+	});
 }
 Config.prototype = {
 	columnForPath: function (dataPath, type) {
@@ -21,13 +26,15 @@ Config.prototype = {
 		}
 		return null;
 	},
-	deconstructColumn: function (column) {
-		for (var key in this.columns) {
-			if (this.columns[key] === column) {
-				column = key;
-				break;
-			} else if (typeof this.columns[key] === 'object' && this.columns[key].alias === column) {
-				column = key;
+	deconstructColumn: function (column, useAliases) {
+		if (useAliases !== false) {
+			for (var key in this.columns) {
+				if (this.columns[key] === column) {
+					column = key;
+					break;
+				} else if (typeof this.columns[key] === 'object' && this.columns[key].alias === column) {
+					column = key;
+				}
 			}
 		}
 		var type = column.split('/', 1)[0];
@@ -89,6 +96,43 @@ function createClass(config, constructor, proto) {
 		});
 	};
 	
+	NewClass.save = function (connection, obj, callback) {
+		var updatePairs = [];
+		var remainderObject = JSON.parse(JSON.stringify(obj)); // Copy, and also ensure it's JSON-friendly
+		var wherePairs = [];
+		for (var i = 0; i < config.sortedColumns.length; i++) {
+			var column = config.sortedColumns[i];
+			var key = config.deconstructColumn(column, false);
+			var alias = config.columnForPath(key.path, key.type);
+			if (!jsonPointer.has(remainderObject, key.path)) {
+				updatePairs.push(alias + "=NULL");
+				continue;
+			}
+			var value = jsonPointer.get(remainderObject, key.path);
+			jsonPointer.set(remainderObject, key.path, undefined);
+			if (key.type === 'boolean' && typeof value === 'boolean') {
+				value = value ? 1 : 0;
+			} else if (key.type === 'integer' && typeof value === 'number' && Math.floor(value) === value) {
+				// nothing to do
+			} else if (key.type === 'number' && typeof value === 'number') {
+				// nothing to do
+			} else if (key.type === 'string' && typeof value === 'string') {
+				// nothing to do
+			} else {
+				value = null;
+			}
+			var pair = alias + "=" + mysql.escape(value);
+			var index = config.keyColumns.indexOf(column);
+			if (index === -1) {
+				updatePairs.push(pair);
+			} else {
+				wherePairs[index] = pair;
+			}
+		}
+		var sql = 'UPDATE ' + escapedTable + '\n\tSET ' + updatePairs.join(',\n\t') + '\nWHERE ' + wherePairs.join(' AND ');
+		connection.query(sql, callback);
+	};
+	
 	NewClass.fromRow = function (row) {
 		var result = new NewClass();
 		for (var key in row) {
@@ -113,9 +157,17 @@ function createClass(config, constructor, proto) {
 
 var publicApi = createClass;
 publicApi.sqlMatchPattern = function (sql, pattern) {
+	if (Array.isArray(pattern)) {
+		for (var i = 0; i < pattern.length; i++) {
+			if (publicApi.sqlMatchPattern(sql, pattern[i])) {	
+				return true;
+			}
+		}
+		return false;
+	}
 	sql = sql.replace(/[ \t\r\n]+/g, ' ');
 	var patternSubs = {};
-	while (sql.length > 0) {
+	while (sql.length > 0 || pattern.length > 0) {
 		if (sql.charAt(0) === pattern.charAt(0)) {
 			sql = sql.substring(1);
 			pattern = pattern.substring(1);

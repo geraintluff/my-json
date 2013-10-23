@@ -1,21 +1,21 @@
 {
-  "name": "myjson",
-  "version": "0.0.0",
-  "description": "Using MySQL databases as JSON stores",
-  "main": "main.js",
-  "dependencies": {
-    "mysql": "~2.0.0-alpha9",
-    "json-pointer": "0.0.4"
-  },
-  "devDependencies": {
-    "grunt": "~0.4.1",
-    "grunt-mocha-test": "~0.7.0",
-    "chai": "~1.8.1"
-  },
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "repository": "",
-  "author": "Geraint Luff",
-  "license": "MIT"
+	"name": "myjson",
+	"version": "0.0.0",
+	"description": "Using MySQL databases as JSON stores",
+	"main": "main.js",
+	"dependencies": {
+		"mysql": "~2.0.0-alpha9",
+		"json-pointer": "0.0.4"
+	},
+	"devDependencies": {
+		"grunt": "~0.4.1",
+		"grunt-mocha-test": "~0.7.0",
+		"chai": "~1.8.1"
+	},
+	"scripts": {
+		"test": "echo \"Error: no test specified\" && exit 1"
+	},
+	"repository": "",
+	"author": "Geraint Luff",
+	"license": "MIT"
 }

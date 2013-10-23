@@ -14,6 +14,7 @@ describe('Basic query generation', function () {
 		
 		var fakeConnection = {
 			query: function (sql, callback) {
+				assert.isTrue(myJson.sqlMatchPattern(sql, 'SELECT {t}.* FROM `TestTable` {t} WHERE 1'), sql);
 				setTimeout(function () {
 					callback(null, [{id_column: 5, name_column: 'test'}]);
 				}, 10);
