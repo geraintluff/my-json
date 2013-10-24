@@ -64,6 +64,13 @@ var BoundTestClass = TestClass.cacheWith(connection);
 ### Open (via JSON Schema search):
 
 ```javascript
+var schema = {
+	type: "object",
+	properties: {
+		"id": {"enum": 5"}
+	}
+};
+
 TestClass.search(connection, schema, function (err, results) {...});
 BoundTestClass.search(schema, function (err, results) {...});
 ```
