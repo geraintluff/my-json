@@ -50,7 +50,9 @@ Currently it only supports plain objects (taken from a single row), but support 
 
 ## Binding to a MySQL connection
 
-For all the operations, you can either supply a MySQL connection each time, or you can bind a connection.  Binding also creates a cache - these bindings are therefore expected to be temporary (perhaps once per request for a web-server).
+For all the operations, you can either supply a MySQL connection each time, or you can bind a connection.
+
+Binding also creates a cache - this means that if the same document is returned by two different queries, then they will be represented by the same instance.  These caches are expected to be temporary (perhaps once per request for a web-server).
 
 ```javascript
 var mysql = require('mysql');
