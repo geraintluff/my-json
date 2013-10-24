@@ -69,7 +69,7 @@ var BoundTestClass = TestClass.cacheWith(connection);
 var schema = {
 	type: "object",
 	properties: {
-		"id": {"enum": 5}
+		"id": {"enum": [5]}
 	}
 };
 
