@@ -162,11 +162,11 @@ function EnumConditions(schema, config, dataPath) {
 		for (var i = 0; i < schema['enum'].length; i++) {
 			var value = schema['enum'][i];
 			if (typeof value === 'number' && Math.floor(value) === value && (column = config.columnForPath(dataPath, 'integer'))) {
-				options.push(tableName + '.' + column + ' = ' + mysql.escape(value));
+				options.push(tableName + '.' + mysql.escapeId(column) + ' = ' + mysql.escape(value));
 			} else if (typeof value === 'number' && (column = config.columnForPath(dataPath, 'number'))) {
-				options.push(tableName + '.' + column + ' = ' + mysql.escape(value));
+				options.push(tableName + '.' + mysql.escapeId(column) + ' = ' + mysql.escape(value));
 			} else if (typeof value === 'string' && (column = config.columnForPath(dataPath, 'string'))) {
-				options.push(tableName + '.' + column + ' = ' + mysql.escape(value));
+				options.push(tableName + '.' + mysql.escapeId(column) + ' = ' + mysql.escape(value));
 			} else {
 				var errorString = "could not check " + (typeof value) + ' enum for ' + dataPath.replace(/\*/g, '_');
 				this.markIncomplete(errorString);
