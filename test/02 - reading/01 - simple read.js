@@ -78,4 +78,81 @@ describe('Basic query generation', function () {
 			done(error);
 		});
 	});
+
+	it('open() using key column', function (done) {
+		
+		var TestClass = myJson({
+			table: 'TestTable',
+			keyColumn: 'integer/id',
+			columns: {
+				'integer/id': 'id_column',
+				'string/name': 'name_column'
+			}
+		});
+		
+		var fakeConnection = myJson.FakeConnection(function (sql, callback) {
+			assert.isTrue(myJson.sqlMatchPattern(sql, 'SELECT {t}.* FROM `TestTable` {t} WHERE {t}.`id_column` = 5'), sql);
+			setTimeout(function () {
+				callback(null, [{id_column: 5, name_column: 'test'}]);
+			}, 10);
+		});
+		
+		TestClass.open(fakeConnection, 5, function (error, result) {
+			assert.instanceOf(result, TestClass);
+			assert.deepEqual(result, {id: 5, name: 'test'});
+			done(error);
+		});
+	});
+
+	it('open() with no result', function (done) {
+		
+		var TestClass = myJson({
+			table: 'TestTable',
+			keyColumn: 'integer/id',
+			columns: {
+				'integer/id': 'id_column',
+				'string/name': 'name_column'
+			}
+		});
+		
+		var fakeConnection = myJson.FakeConnection(function (sql, callback) {
+			assert.isTrue(myJson.sqlMatchPattern(sql, 'SELECT {t}.* FROM `TestTable` {t} WHERE {t}.`id_column` = 10'), sql);
+			setTimeout(function () {
+				callback(null, []);
+			}, 10);
+		});
+		
+		TestClass.open(fakeConnection, 10, function (error, result) {
+			assert.isUndefined(result);
+			done(error);
+		});
+	});
+
+	it('open() using key columns (cast string/number)', function (done) {
+		
+		var TestClass = myJson({
+			table: 'TestTable',
+			keyColumns: ['integer/id', 'string/name'],
+			columns: {
+				'integer/id': 'id_column',
+				'string/name': 'name_column'
+			}
+		});
+		
+		var fakeConnection = myJson.FakeConnection(function (sql, callback) {
+			assert.isTrue(myJson.sqlMatchPattern(sql, [
+				'SELECT {t}.* FROM `TestTable` {t} WHERE ({t}.`id_column` = 5 AND {t}.`name_column` = \'test\')',
+				'SELECT {t}.* FROM `TestTable` {t} WHERE ({t}.`name_column` = \'test\' AND {t}.`id_column` = 5)'
+			]), sql);
+			setTimeout(function () {
+				callback(null, [{id_column: 5, name_column: 'test'}]);
+			}, 10);
+		});
+		
+		TestClass.open(fakeConnection, '5', 'test', function (error, result) {
+			assert.instanceOf(result, TestClass);
+			assert.deepEqual(result, {id: 5, name: 'test'});
+			done(error);
+		});
+	});
 });

@@ -6,7 +6,7 @@ function SchemaCondition() {
 SchemaCondition.prototype = {
 	/* Returns the conditions as MySQL conditions that could be used in a "WHERE" clause.
 	
-	"inverted" means that the conditions are inverted - however, they MUST still fail if the value does not exist (NULL in database).
+	"inverted" means that the conditions are inverted - however, they MUST still fail if the value does not exist (NULL in database).  The usual way to do this is to evaluate to NULL (which works for almost all operators anyway).
 	*/
 	sqlWhere: function (tableName, inverted, indent) {
 		throw new Error('Sub-classes must implement sqlWhere() themselves');
@@ -72,12 +72,27 @@ SchemaCondition.fromSchema = function (schema, config, dataPath) {
 		var enumConditions = new EnumConditions(schema, config, dataPath);
 		allConditions.add(enumConditions);
 	}
+	if (schema['allOf']) {
+		var allOfConditions = new AllOfConditions(schema, config, dataPath);
+		allConditions.add(allOfConditions);
+	}
+	if (schema['anyOf']) {
+		var anyOfConditions = new AnyOfConditions(schema, config, dataPath);
+		allConditions.add(anyOfConditions);
+	}
+	if (schema['not']) {
+		var notCondition = new NotCondition(schema, config, dataPath);
+		allConditions.add(notCondition);
+	}
 	
 	for (var key in schema) {
 		switch (key) {
 			case 'type':
 			case 'properties':
 			case 'enum':
+			case 'not':
+			case 'anyOf':
+			case 'allOf':
 				continue;
 			default:
 				throw new Error('unknown keyword: ' + key);
@@ -109,8 +124,13 @@ function SqlAnd() {
 	SqlComposite.call(this);
 	this.sqlWhere = function (tableName, inverted, indent) {
 		var parts = [];
-		for (var i = 0; i < this.conditions.length; i++) {
-			var condition = this.conditions[i];
+		var conditions = this.conditions.slice();
+		while (conditions.length > 0) {
+			var condition = conditions.shift();
+			if (condition instanceof SqlAnd) {
+				conditions = condition.conditions.concat(conditions);
+				continue;
+			}
 			parts.push(condition.sqlWhere(tableName, inverted, indent));
 		}
 		return inverted ? SqlOr.joinStrings(parts, indent) : SqlAnd.joinStrings(parts, indent);
@@ -127,15 +147,27 @@ SqlAnd.joinStrings = function (parts, indent) {
 	} else if (parts.length === 1) {
 		return parts[0];
 	}
-	throw new Error('not implemented');
+	if (indent) {
+		for (var i = 0; i < parts.length; i++) {
+			parts[i] = parts[i].replace(/\n/g, '\n' + indent);
+		}
+		return '(\n' + indent + parts.join('\n' + indent + 'AND ') + '\n)';
+	} else {
+		return '(' + parts.join(' AND ') + ')';
+	}
 }
 
 function SqlOr() {
 	SqlComposite.call(this);
 	this.sqlWhere = function (tableName, inverted, indent) {
 		var parts = [];
-		for (var i = 0; i < this.conditions.length; i++) {
-			var condition = this.conditions[i];
+		var conditions = this.conditions.slice();
+		while (conditions.length > 0) {
+			var condition = conditions.shift();
+			if (condition instanceof SqlOr) {
+				conditions = condition.conditions.concat(conditions);
+				continue;
+			}
 			parts.push(condition.sqlWhere(tableName, inverted, indent));
 		}
 		return inverted ? SqlAnd.joinStrings(parts, indent) : SqlOr.joinStrings(parts, indent);
@@ -152,21 +184,29 @@ SqlOr.joinStrings = function (parts, indent) {
 	} else if (parts.length === 1) {
 		return parts[0];
 	}
-	throw new Error('not implemented');
+	if (indent) {
+		for (var i = 0; i < parts.length; i++) {
+			parts[i] = parts[i].replace(/\n/g, '\n' + indent);
+		}
+		return '(\n' + indent + parts.join('\n' + indent + 'OR ') + '\n)';
+	} else {
+		return '(' + parts.join(' OR ') + ')';
+	}
 };
 
 function EnumConditions(schema, config, dataPath) {
 	this.sqlWhere = function (tableName, inverted, indent) {
 		var options = [];
 		var column;
+		var comparitor = inverted ? ' != ' : ' = ';
 		for (var i = 0; i < schema['enum'].length; i++) {
 			var value = schema['enum'][i];
 			if (typeof value === 'number' && Math.floor(value) === value && (column = config.columnForPath(dataPath, 'integer'))) {
-				options.push(tableName + '.' + mysql.escapeId(column) + ' = ' + mysql.escape(value));
+				options.push(tableName + '.' + mysql.escapeId(column) + comparitor + mysql.escape(value));
 			} else if (typeof value === 'number' && (column = config.columnForPath(dataPath, 'number'))) {
-				options.push(tableName + '.' + mysql.escapeId(column) + ' = ' + mysql.escape(value));
+				options.push(tableName + '.' + mysql.escapeId(column) + comparitor + mysql.escape(value));
 			} else if (typeof value === 'string' && (column = config.columnForPath(dataPath, 'string'))) {
-				options.push(tableName + '.' + mysql.escapeId(column) + ' = ' + mysql.escape(value));
+				options.push(tableName + '.' + mysql.escapeId(column) + comparitor + mysql.escape(value));
 			} else {
 				var errorString = "could not check " + (typeof value) + ' enum for ' + dataPath.replace(/\*/g, '_');
 				this.markIncomplete(errorString);
@@ -177,6 +217,30 @@ function EnumConditions(schema, config, dataPath) {
 	}
 }
 EnumConditions.prototype = Object.create(SchemaCondition.prototype);
+
+function AnyOfConditions(schema, config, dataPath) {
+	var orConditions = new SqlOr();
+	for (var i = 0; i < schema.anyOf.length; i++) {
+		orConditions.add(SchemaCondition.fromSchema(schema.anyOf[i], config, dataPath));
+	}
+	return orConditions;
+}
+
+function AllOfConditions(schema, config, dataPath) {
+	var andConditions = new SqlAnd();
+	for (var i = 0; i < schema.allOf.length; i++) {
+		andConditions.add(SchemaCondition.fromSchema(schema.allOf[i], config, dataPath));
+	}
+	return andConditions;
+}
+
+function NotCondition(schema, config, dataPath) {
+	var innerCondition = SchemaCondition.fromSchema(schema.not, config, dataPath);
+	this.sqlWhere = function (tableName, inverted, indent) {
+		return innerCondition.sqlWhere(tableName, !inverted, indent);
+	}
+}
+NotCondition.prototype = Object.create(SchemaCondition.prototype);
 
 function collectObjectConditions(schema, config, dataPath) {
 	var result = new SqlAnd();

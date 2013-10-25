@@ -22,27 +22,44 @@ LoadError.prototype = new Error('Error loading value');
 function Config(obj) {
 	this.table = obj.table;
 	this.columns = obj.columns;
-	this.keyColumns = (obj.keyColumn ? [obj.keyColumn] : obj.keyColumns) || [];
+	this.readOnly = obj.readOnly || {};
+	this.writeOnly = obj.writeOnly || {};
+	
+	this.keyColumns = obj.keyColumn || obj.keyColumns || [];
+	this.keyColumns = Array.isArray(this.keyColumns) ? this.keyColumns : [this.keyColumns];
 	this.sqlKeyColumns = [];
 	for (var i = 0; i < this.keyColumns.length; i++) {
 		var column = this.keyColumns[i];
-		if (typeof this.columns[column] === 'object') {
-			this.sqlKeyColumns.push(this.columns[column].alias || column);
-		} else if (typeof this.columns[column] === 'string') {
-			this.sqlKeyColumns.push(this.columns[column]);
+		var entry = this.columns[column] || this.readOnly[column];
+		if (typeof entry === 'object') {
+			this.sqlKeyColumns.push(entry.alias || column);
+		} else if (typeof entry === 'string') {
+			this.sqlKeyColumns.push(entry);
 		} else {
 			this.sqlKeyColumns.push(column);
 		}
 	}
-	this.sortedColumns = Object.keys(this.columns);
+	this.readColumns = Object.keys(this.columns).concat(Object.keys(this.readOnly));
+	this.writeColumns = Object.keys(this.columns).concat(Object.keys(this.writeOnly));
 	// Load-order: shortest first
-	this.sortedColumns.sort(function (a, b) {
+	this.readColumns.sort(function (a, b) {
 		return a.length - b.length;
 	});
+	// Write-order: longest first
+	this.writeColumns.sort(function (a, b) {
+		return b.length - a.length;
+	});
+	
+	for (var key in this.readOnly) {
+		this.columns[key] = this.columns[key] || this.readOnly[key];
+	}
+	for (var key in this.writeOnly) {
+		this.columns[key] = this.columns[key] || this.writeOnly[key];
+	}
 }
 Config.prototype = {
 	columnForPath: function (dataPath, type) {
-		var columnKey = type + dataPath;
+		var columnKey = (type || "") + dataPath;
 		if (this.columns[columnKey]) {
 			if (typeof this.columns[columnKey] === 'object') {
 				return this.columns[columnKey].alias || columnKey;
@@ -112,9 +129,49 @@ function createClass(config, constructor, proto) {
 		sqlFromSchema: function (schema) {
 			var condition = SchemaCondition.fromSchema(schema, config);
 			var table = initialTableName;
-			return 'SELECT ' + table + '.*\n\tFROM ' + escapedTable + ' ' + table + '\n\tWHERE ' + condition.sqlWhere(table, false, '\t');
+			return 'SELECT ' + table + '.*\n\tFROM ' + escapedTable + ' ' + table + '\n\tWHERE ' + condition.sqlWhere(table, false, '\t').replace(/\n/g, '\n\t');
 		},
 		// TODO: could be abstracted out?
+		open: function (connection) {
+			var callback = arguments[arguments.length - 1];
+			var keyValues = Array.prototype.slice.call(arguments, 1, arguments.length - 1);
+			var schema = {};
+			if (keyValues.length !== config.keyColumns.length) {
+				throw new Error('Expected ' + config.keyColumns.length + ' key columns, only got ' + keyValues.length);
+			}
+			for (var i = 0; i < keyValues.length; i++) {
+				var value = keyValues[i];
+				var key = config.deconstructColumn(config.keyColumns[i]);
+				if ((key.type === 'integer' || key.type === 'number') && typeof value !== 'number') {
+					value = parseFloat(value, 10);
+					if (isNaN(value)) {
+						throw new Error('Key value must be number: ' + keyValues[i]);
+					}
+				} else if (key.type === 'string') {
+					value = "" + value;
+				}
+				
+				var parts = jsonPointer.parse(key.path);
+				var targetSchema = schema;
+				for (var j = 0; j < parts.length; j++) {
+					var part = parts[j];
+					targetSchema.type = 'object';
+					targetSchema.properties = targetSchema.properties || {};
+					targetSchema.properties[part] = {};
+					targetSchema = targetSchema.properties[part];
+				}
+				targetSchema['enum'] = [value];
+			}
+			return staticMethods.search.call(this, connection, schema, function (err, results) {
+				if (results.length > 1) {
+					throw new Error('Multiple results for key: ' + keyValues);
+				}
+				if (err) {
+					return callback(err);
+				}
+				callback(null, results[0]);
+			});
+		},
 		search:  function (connection, schema, callback) {
 			var thisClass = this;
 			var sql = this.sqlFromSchema(schema);
@@ -127,6 +184,7 @@ function createClass(config, constructor, proto) {
 				}
 				callback(null, results);
 			});
+			return this;
 		},
 		save: function (connection, obj, callback) {
 			var remainderObject = JSON.parse(JSON.stringify(obj)); // Copy, and also ensure it's JSON-friendly
@@ -134,8 +192,8 @@ function createClass(config, constructor, proto) {
 			var wherePairs = [];
 			var missingKeyColumns = [];
 			// Longest first
-			for (var i = config.sortedColumns.length - 1; i >= 0; i--) {
-				var column = config.sortedColumns[i];
+			for (var i = 0; i < config.writeColumns.length; i++) {
+				var column = config.writeColumns[i];
 				var isKeyColumn = config.keyColumns.indexOf(column) !== -1;
 				var key = config.deconstructColumn(column, false);
 				var alias = config.columnForPath(key.path, key.type);
@@ -210,6 +268,7 @@ function createClass(config, constructor, proto) {
 					callback(null, result);
 				});
 			}
+			return this;
 		},
 		remove: function (connection, obj, callback) {
 			var updateObj = {};
@@ -253,7 +312,6 @@ function createClass(config, constructor, proto) {
 				wherePairs.push(pair);
 			}
 			var sql = 'DELETE FROM ' + escapedTable + ' WHERE ' + wherePairs.join(' AND ');
-			console.log(sql);
 			connection.query(sql, function (err, result) {
 				if (err) {
 					return callback(err);
@@ -264,19 +322,21 @@ function createClass(config, constructor, proto) {
 				}
 				callback(null, result);
 			});
+			return this;
 		},
 		fromRow: function (row) {
 			var result = new NewClass();
 			var errors = [];
-			for (var key in row) {
-				if (!Object.prototype.hasOwnProperty.call(row, key)) {
+			for (var i = 0; i < config.readColumns.length; i++) {
+				var key = config.deconstructColumn(config.readColumns[i], 'read');
+				var rowKey = config.columnForPath(key.path, key.type);
+				if (!Object.prototype.hasOwnProperty.call(row, rowKey)) {
 					continue;
 				}
-				var value = row[key];
-				if (value === null) {
+				var value = row[rowKey];
+				if (value === null || typeof value === 'undefined') {
 					continue;
 				}
-				key = config.deconstructColumn(key);
 				if (key.type === 'boolean') {
 					value = !!value;
 				} else if (key.type === 'number') {
@@ -316,6 +376,7 @@ function createClass(config, constructor, proto) {
 			result.search = result.search.bind(result, mysqlConnection);
 			result.save = result.save.bind(result, mysqlConnection);
 			result.remove = result.remove.bind(result, mysqlConnection);
+			result.open = result.open.bind(result, mysqlConnection);
 			return result;
 		},
 		cache: function () {
@@ -328,12 +389,47 @@ function createClass(config, constructor, proto) {
 			}
 			
 			var objectCache = {};
+			Cache.open = function (connection) {
+				var callback = arguments[arguments.length - 1];
+				var keyValues = Array.prototype.slice.call(arguments, 1, arguments.length - 1);
+				// Cast to appropriate type if needed
+				var newKeyValues = [];
+				if (keyValues.length !== config.keyColumns.length) {
+					throw new Error('Expected ' + config.keyColumns.length + ' key columns, only got ' + keyValues.length);
+				}
+				for (var i = 0; i < keyValues.length; i++) {
+					var value = keyValues[i];
+					var key = config.deconstructColumn(config.keyColumns[i]);
+					if ((key.type === 'integer' || key.type === 'number') && typeof value !== 'number') {
+						value = parseFloat(value, 10);
+						if (isNaN(value)) {
+							throw new Error('Key value must be number: ' + keyValues[i]);
+						}
+					} else if (key.type === 'string') {
+						value = "" + value;
+					}
+					newKeyValues[i] = value;
+				}
+				var keyJson = JSON.stringify(newKeyValues);
+				if (keyJson in objectCache) {
+					process.nextTick(function () {
+						callback(null, objectCache[keyJson]);
+					});
+				} else {
+					NewClass.open.apply(this, arguments);
+				}
+				return this;
+			}
 			Cache.fromRow = function (row) {
 				var key = [];
 				for (var i = 0; i < config.sqlKeyColumns.length; i++) {
 					key[i] = row[config.sqlKeyColumns[i]];
 				}
 				var keyJson = JSON.stringify(key); // all scalar values, so this is deterministic
+				if (keyJson === '[]') {
+					// Nothing to cache, or all key columns undefined
+					return NewClass.fromRow(row);
+				}
 				if (keyJson in objectCache) {
 					return objectCache[keyJson];
 				} else {
@@ -361,7 +457,11 @@ publicApi.sqlMatchPattern = function (sql, pattern) {
 		}
 		return false;
 	}
-	sql = sql.replace(/[ \t\r\n]+/g, ' ');
+
+	// Normalise both SQL and pattern - convert all whitespace to single-spaces, strip space around brackets
+	sql = sql.replace(/[ \t\r\n]+/g, ' ').replace(/ ?\( ?/g, '(').replace(/ ?\) ?/g, ')');
+	pattern = pattern.replace(/[ \t\r\n]+/g, ' ').replace(/ ?\( ?/g, '(').replace(/ ?\) ?/g, ')');
+	
 	var patternSubs = {};
 	while (sql.length > 0 || pattern.length > 0) {
 		if (sql.charAt(0) === pattern.charAt(0)) {

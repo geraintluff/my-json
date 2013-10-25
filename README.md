@@ -9,6 +9,7 @@ Queries are performed using JSON Schema to provide powerful search constraints o
 You generate a class using a config object.  This config file specifies:
 
 * which table to use
+* which column(s) to use for keys
 * what data types to supply to / expect from different columns
 * where in the resulting JSON document those values should go
 
@@ -17,11 +18,11 @@ var myJson = require('my-json');
 
 var TestClass = myJson({
 	table: 'TestTable',
-    keyColumn: 'integer/id',
+	keyColumn: 'integer/id',
 	columns: {
 		'integer/id': 'id',
 		'string/name': 'name',
-        'json': 'json_remainder'
+		'json': 'json_remainder'
 	}
 });
 ```
@@ -63,7 +64,18 @@ var BoundTestClass = TestClass.cacheWith(connection);
 
 ## Loading, saving, editing
 
-### Open (via JSON Schema search):
+### Open:
+
+```javascript
+TestClass.open(connection, 5, function (err, result) {...});
+BoundTestClass.open(5, function (err, result) {...});
+```
+
+The arguments given to `open()` should match (length and order) the columns specified in the config's `"keyColumn"` (or `"keyColumns"`) property.
+
+If found, `result` will be an instance of the appropriate class - otherwise, it will be `undefined`.
+
+### Search (with JSON Schema):
 
 ```javascript
 var schema = {
