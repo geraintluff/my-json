@@ -1,7 +1,7 @@
 var assert = require('chai').assert;
 var myJson = require('../../main');
 
-describe('Basic query generation', function () {
+describe('Simple reading', function () {
 	it('parse simple object', function (done) {
 		
 		var TestClass = myJson({

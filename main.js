@@ -186,7 +186,11 @@ function createClass(config, constructor, proto) {
 			});
 			return this;
 		},
-		save: function (connection, obj, callback) {
+		save: function (connection, obj, forceInsert, callback) {
+			if (typeof forceInsert === 'function') {
+				callback = forceInsert;
+				forceInsert = undefined;
+			}
 			var remainderObject = JSON.parse(JSON.stringify(obj)); // Copy, and also ensure it's JSON-friendly
 			var updateObj = {};
 			var wherePairs = [];
@@ -198,7 +202,7 @@ function createClass(config, constructor, proto) {
 				var key = config.deconstructColumn(column, false);
 				var alias = config.columnForPath(key.path, key.type);
 				if (!jsonPointer.has(obj, key.path) || typeof (value = jsonPointer.get(obj, key.path)) === 'undefined') {
-					if (isKeyColumn) {
+					if (isKeyColumn && !forceInsert) {
 						missingKeyColumns.push(column);
 					} else {
 						updateObj[alias] = null;
@@ -231,27 +235,39 @@ function createClass(config, constructor, proto) {
 					throw new Error('Unknown column type: ' + key.type);
 					continue;
 				}
-				if (isKeyColumn) {
+				if (isKeyColumn && !forceInsert) {
 					var pair = mysql.escapeId(alias) + "=" + mysql.escape(value);
 					wherePairs.push(pair);
 				} else {
 					updateObj[alias] = value;
 				}
 			}
-			if (missingKeyColumns.length === 0) {
+			if (missingKeyColumns.length === 0 && !forceInsert) {
 				var updatePairs = [];
 				for (var alias in updateObj) {
 					updatePairs.push(mysql.escapeId(alias) + "=" + mysql.escape(updateObj[alias]));
 				}
 				var sql = 'UPDATE ' + escapedTable + '\n\tSET ' + updatePairs.join(',\n\t') + '\nWHERE ' + wherePairs.join(' AND ');
-				connection.query(sql, callback);
+				connection.query(sql, function (err, result) {
+					if (err) {
+						return callback(err);
+					}
+					if (result.affectedRows || forceInsert === false) {
+						callback(null, result);
+					} else {
+						NewClass.save(connection, obj, true, callback);
+					}
+				});
 			} else {
-				if (missingKeyColumns.length !== 1) {
+				if (missingKeyColumns.length > 1) {
 					throw new Error('Cannot have more than one missing key column: ' + missingKeyColumns);
 				}
-				var keyColumn = config.deconstructColumn(missingKeyColumns[0]);
-				if (keyColumn.type !== 'integer' && keyColumn.type !== 'number') {
-					throw new Error('Missing key column must be number: ' + missingKeyColumns);
+				var keyColumn = null;
+				if (missingKeyColumns.length === 1) {
+					var keyColumn = config.deconstructColumn(missingKeyColumns[0]);
+					if (keyColumn.type !== 'integer' && keyColumn.type !== 'number') {
+						throw new Error('Missing key column must be number: ' + missingKeyColumns);
+					}
 				}
 				var insertColumns = [];
 				var insertValues = [];
@@ -264,7 +280,9 @@ function createClass(config, constructor, proto) {
 					if (err) {
 						return callback(err);
 					}
-					jsonPointer.set(obj, keyColumn.path, result.insertId);
+					if (keyColumn) {
+						jsonPointer.set(obj, keyColumn.path, result.insertId);
+					}
 					callback(null, result);
 				});
 			}
@@ -495,12 +513,31 @@ function FakeConnection (queryMethod) {
 	}
 	this.query = function (sql, inserts, callback) {
 		if (typeof inserts === 'function') {
-			return queryMethod.call(this, sql, inserts);
+			return queryMethod.call(this, sql, function (err, results) {
+				inserts(err, results || {affectedRows: 1});
+			});
 		}
 		sql = mysql.format(sql, inserts);
-		return queryMethod.call(this, sql, callback);
+		return queryMethod.call(this, sql, function (err, results) {
+			callback(err, results || {affectedRows: 1});
+		});
 	}
 };
 publicApi.FakeConnection = FakeConnection;
+
+function ClassGroup(configs) {
+	if (!(this instanceof ClassGroup)) {
+		return new ClassGroup(configs);
+	}
+	this.addClass = function (key, config) {
+		this[key] = createClass(config);
+	};
+	for (var key in configs) {
+		this.addClass(key, configs[key]);
+	}
+}
+ClassGroup.prototype = {};
+
+publicApi.group = ClassGroup;
 
 module.exports = publicApi;
