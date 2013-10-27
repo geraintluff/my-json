@@ -220,15 +220,11 @@ function createClass(config, constructor, proto) {
 		open: function (connection) {
 			var callback = arguments[arguments.length - 1];
 			var keyValues = Array.prototype.slice.call(arguments, 1, arguments.length - 1);
-			var schema = schemaForKeyValues(normaliseKeyValues(keyValues));
-			return staticMethods.search.call(this, connection, schema, function (err, results) {
-				if (results.length > 1) {
-					throw new Error('Multiple results for key: ' + keyValues);
-				}
+			return staticMethods.openMultiple.call(this, connection, {single: keyValues}, function (err, results) {
 				if (err) {
 					return callback(err);
 				}
-				callback(null, results[0]);
+				callback(null, results.single);
 			});
 		},
 		search:  function (connection, schema, callback) {
@@ -494,6 +490,9 @@ function createClass(config, constructor, proto) {
 							newMap[mapKey] = map[mapKey];
 						}
 					}
+					if (Object.keys(newMap).length === 0) {
+						return callback(null, cachedResults);
+					}
 				
 					return NewClass.openMultiple.call(this, connection, newMap, function (err, results) {
 						if (err) {
@@ -508,17 +507,12 @@ function createClass(config, constructor, proto) {
 				open: function (connection) {
 					var callback = arguments[arguments.length - 1];
 					var keyValues = Array.prototype.slice.call(arguments, 1, arguments.length - 1);
-					// Cast to appropriate type if needed
-					var newKeyValues = normaliseKeyValues(keyValues);
-					var keyJson = JSON.stringify(newKeyValues);
-					if (keyJson in objectCache) {
-						process.nextTick(function () {
-							callback(null, objectCache[keyJson]);
-						});
-					} else {
-						NewClass.open.apply(this, arguments);
-					}
-					return this;
+					return cacheMethods.openMultiple.call(this, connection, {single: keyValues}, function (err, results) {
+						if (err) {
+							return callback(err);
+						}
+						callback(null, results.single);
+					});
 				},
 				fromRow: function (row) {
 					var key = [];
