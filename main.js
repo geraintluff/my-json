@@ -125,43 +125,102 @@ function createClass(config, constructor, proto) {
 	}
 	NewClass.prototype = proto || {};
 	
+	function normaliseKeyValues(keyValues) {
+		var newKeyValues = [];
+		if (keyValues.length !== config.keyColumns.length) {
+			throw new Error('Expected ' + config.keyColumns.length + ' key columns, only got ' + keyValues.length);
+		}
+		for (var i = 0; i < keyValues.length; i++) {
+			var value = keyValues[i];
+			var key = config.deconstructColumn(config.keyColumns[i]);
+			if ((key.type === 'integer' || key.type === 'number') && typeof value !== 'number') {
+				value = parseFloat(value, 10);
+				if (isNaN(value)) {
+					throw new Error('Key value must be number: ' + keyValues[i]);
+				}
+			} else if (key.type === 'string') {
+				value = "" + value;
+			}
+			newKeyValues[i] = value;
+		}
+		return newKeyValues;
+	}
+	function schemaForKeyValues(keyValues) {
+		var schema = {};
+		for (var i = 0; i < keyValues.length; i++) {
+			var value = keyValues[i];
+			var key = config.deconstructColumn(config.keyColumns[i]);
+			
+			var parts = jsonPointer.parse(key.path);
+			var targetSchema = schema;
+			for (var j = 0; j < parts.length; j++) {
+				var part = parts[j];
+				targetSchema.type = 'object';
+				targetSchema.properties = targetSchema.properties || {};
+				targetSchema.properties[part] = {};
+				targetSchema = targetSchema.properties[part];
+			}
+			targetSchema['enum'] = [value];
+		}
+		return schema;
+	}
+	
 	var staticMethods = {
 		sqlFromSchema: function (schema) {
 			var condition = SchemaCondition.fromSchema(schema, config);
 			var table = initialTableName;
 			return 'SELECT ' + table + '.*\n\tFROM ' + escapedTable + ' ' + table + '\n\tWHERE ' + condition.sqlWhere(table, false, '\t').replace(/\n/g, '\n\t');
 		},
-		// TODO: could be abstracted out?
+		openMultiple: function (connection, map, callback) {
+			if (Array.isArray(map)) {
+				// Create an object equivalent, and convert back to an array afterwards
+				var newMap = {};
+				for (var i = 0; i < map.length; i++) {
+					newMap[i] = map[i];
+				}
+				return staticMethods.openMultiple.call(this, connection, newMap, function (err, result) {
+					var arrayResult = [];
+					for (var i = 0; i < map.length; i++) {
+						arrayResult[i] = result[i];
+					}
+					callback(null, arrayResult);
+				});
+			}
+			var thisClass = this;
+			var schema = {anyOf: []};
+			var resultsKeys = {};
+			for (var mapKey in map) {
+				var keyValues = Array.isArray(map[mapKey]) ? map[mapKey] : [map[mapKey]];
+				var newKeyValues = normaliseKeyValues(keyValues);
+				resultsKeys[mapKey] = JSON.stringify(newKeyValues);
+				schema.anyOf.push(schemaForKeyValues(newKeyValues));
+			}
+			staticMethods.search.call(this, connection, schema, function (err, results) {
+				if (err) {
+					return callback(err);
+				}
+				var resultsMap = {};
+				for (var resultNumber = 0; resultNumber < results.length; resultNumber++) {
+					var obj = results[resultNumber];
+					var key = [];
+					for (var i = 0; i < config.keyColumns.length; i++) {
+						var splitKey = config.deconstructColumn(config.keyColumns[i]);
+						key[i] = jsonPointer.get(obj, splitKey.path);
+					}
+					var keyJson = JSON.stringify(key); // all scalar values, so this is deterministic
+					resultsMap[keyJson] = obj;
+				}
+				var result = {};
+				for (var key in resultsKeys) {
+					result[key] = resultsMap[resultsKeys[key]];
+				}
+				callback(null, result);
+			});
+		},
 		open: function (connection) {
 			var callback = arguments[arguments.length - 1];
 			var keyValues = Array.prototype.slice.call(arguments, 1, arguments.length - 1);
-			var schema = {};
-			if (keyValues.length !== config.keyColumns.length) {
-				throw new Error('Expected ' + config.keyColumns.length + ' key columns, only got ' + keyValues.length);
-			}
-			for (var i = 0; i < keyValues.length; i++) {
-				var value = keyValues[i];
-				var key = config.deconstructColumn(config.keyColumns[i]);
-				if ((key.type === 'integer' || key.type === 'number') && typeof value !== 'number') {
-					value = parseFloat(value, 10);
-					if (isNaN(value)) {
-						throw new Error('Key value must be number: ' + keyValues[i]);
-					}
-				} else if (key.type === 'string') {
-					value = "" + value;
-				}
-				
-				var parts = jsonPointer.parse(key.path);
-				var targetSchema = schema;
-				for (var j = 0; j < parts.length; j++) {
-					var part = parts[j];
-					targetSchema.type = 'object';
-					targetSchema.properties = targetSchema.properties || {};
-					targetSchema.properties[part] = {};
-					targetSchema = targetSchema.properties[part];
-				}
-				targetSchema['enum'] = [value];
-			}
+			var schema = schemaForKeyValues(normaliseKeyValues(keyValues));
 			return staticMethods.search.call(this, connection, schema, function (err, results) {
 				if (results.length > 1) {
 					throw new Error('Multiple results for key: ' + keyValues);
@@ -187,11 +246,17 @@ function createClass(config, constructor, proto) {
 			return this;
 		},
 		save: function (connection, obj, forceInsert, callback) {
+			var thisClass = this;
 			if (typeof forceInsert === 'function') {
 				callback = forceInsert;
 				forceInsert = undefined;
 			}
-			var remainderObject = JSON.parse(JSON.stringify(obj)); // Copy, and also ensure it's JSON-friendly
+			try {
+				var remainderObject = JSON.parse(JSON.stringify(obj)); // Copy, and also ensure it's JSON-friendly
+			} catch (e) {
+				console.log(obj);
+				console.log(JSON.stringify(obj));
+			}
 			var updateObj = {};
 			var wherePairs = [];
 			var missingKeyColumns = [];
@@ -255,7 +320,7 @@ function createClass(config, constructor, proto) {
 					if (result.affectedRows || forceInsert === false) {
 						callback(null, result);
 					} else {
-						NewClass.save(connection, obj, true, callback);
+						staticMethods.save.call(thisClass, connection, obj, true, callback);
 					}
 				});
 			} else {
@@ -395,9 +460,84 @@ function createClass(config, constructor, proto) {
 			result.save = result.save.bind(result, mysqlConnection);
 			result.remove = result.remove.bind(result, mysqlConnection);
 			result.open = result.open.bind(result, mysqlConnection);
+			result.openMultiple = result.openMultiple.bind(result, mysqlConnection);
 			return result;
 		},
 		cache: function () {
+			var objectCache = {};
+			
+			var cacheMethods = {
+				openMultiple: function (connection, map, callback) {
+					if (Array.isArray(map)) {
+						// Create an object equivalent, and convert back to an array afterwards
+						var newMap = {};
+						for (var i = 0; i < map.length; i++) {
+							newMap[i] = map[i];
+						}
+						return cacheMethods.openMultiple.call(this, connection, newMap, function (err, result) {
+							var arrayResult = [];
+							for (var i = 0; i < map.length; i++) {
+								arrayResult[i] = result[i];
+							}
+							callback(null, arrayResult);
+						});
+					}
+					var newMap = {};
+					var cachedResults = {};
+					for (var mapKey in map) {
+						var keyValues = Array.isArray(map[mapKey]) ? map[mapKey] : [map[mapKey]];
+						var newKeyValues = normaliseKeyValues(keyValues);
+						var keyJson = JSON.stringify(newKeyValues);
+						if (keyJson in objectCache) {
+							cachedResults[mapKey] = objectCache[keyJson];
+						} else {
+							newMap[mapKey] = map[mapKey];
+						}
+					}
+				
+					return NewClass.openMultiple.call(this, connection, newMap, function (err, results) {
+						if (err) {
+							return callback(err);
+						}
+						for (var key in cachedResults) {
+							results[key] = cachedResults[key];
+						}
+						callback(null, results);
+					});
+				},
+				open: function (connection) {
+					var callback = arguments[arguments.length - 1];
+					var keyValues = Array.prototype.slice.call(arguments, 1, arguments.length - 1);
+					// Cast to appropriate type if needed
+					var newKeyValues = normaliseKeyValues(keyValues);
+					var keyJson = JSON.stringify(newKeyValues);
+					if (keyJson in objectCache) {
+						process.nextTick(function () {
+							callback(null, objectCache[keyJson]);
+						});
+					} else {
+						NewClass.open.apply(this, arguments);
+					}
+					return this;
+				},
+				fromRow: function (row) {
+					var key = [];
+					for (var i = 0; i < config.sqlKeyColumns.length; i++) {
+						key[i] = row[config.sqlKeyColumns[i]];
+					}
+					var keyJson = JSON.stringify(key); // all scalar values, so this is deterministic
+					if (keyJson === '[]') {
+						// Nothing to cache, or all key columns undefined
+						return NewClass.fromRow(row);
+					}
+					if (keyJson in objectCache) {
+						return objectCache[keyJson];
+					} else {
+						return objectCache[keyJson] = NewClass.fromRow(row);
+					}
+				}
+			};
+
 			function Cache() {
 				return NewClass.apply(this, arguments);
 			}
@@ -405,55 +545,10 @@ function createClass(config, constructor, proto) {
 			for (var key in staticMethods) {
 				Cache[key] = staticMethods[key];
 			}
-			
-			var objectCache = {};
-			Cache.open = function (connection) {
-				var callback = arguments[arguments.length - 1];
-				var keyValues = Array.prototype.slice.call(arguments, 1, arguments.length - 1);
-				// Cast to appropriate type if needed
-				var newKeyValues = [];
-				if (keyValues.length !== config.keyColumns.length) {
-					throw new Error('Expected ' + config.keyColumns.length + ' key columns, only got ' + keyValues.length);
-				}
-				for (var i = 0; i < keyValues.length; i++) {
-					var value = keyValues[i];
-					var key = config.deconstructColumn(config.keyColumns[i]);
-					if ((key.type === 'integer' || key.type === 'number') && typeof value !== 'number') {
-						value = parseFloat(value, 10);
-						if (isNaN(value)) {
-							throw new Error('Key value must be number: ' + keyValues[i]);
-						}
-					} else if (key.type === 'string') {
-						value = "" + value;
-					}
-					newKeyValues[i] = value;
-				}
-				var keyJson = JSON.stringify(newKeyValues);
-				if (keyJson in objectCache) {
-					process.nextTick(function () {
-						callback(null, objectCache[keyJson]);
-					});
-				} else {
-					NewClass.open.apply(this, arguments);
-				}
-				return this;
+			for (var key in cacheMethods) {
+				Cache[key] = cacheMethods[key];
 			}
-			Cache.fromRow = function (row) {
-				var key = [];
-				for (var i = 0; i < config.sqlKeyColumns.length; i++) {
-					key[i] = row[config.sqlKeyColumns[i]];
-				}
-				var keyJson = JSON.stringify(key); // all scalar values, so this is deterministic
-				if (keyJson === '[]') {
-					// Nothing to cache, or all key columns undefined
-					return NewClass.fromRow(row);
-				}
-				if (keyJson in objectCache) {
-					return objectCache[keyJson];
-				} else {
-					return objectCache[keyJson] = NewClass.fromRow(row);
-				}
-			};
+			
 			return Cache;
 		}
 	}
