@@ -462,7 +462,17 @@ function createClass(config, constructor, proto) {
 		cache: function () {
 			var objectCache = {};
 			
+			var laterOpenParams = {};
 			var cacheMethods = {
+				openLater: function () {
+					var keyValues = normaliseKeyValues(arguments);
+					var keyJson = JSON.stringify(keyValues);
+					if (keyJson in objectCache) {
+						return;
+					}
+					laterOpenParams[keyJson] = keyValues;
+					return this;
+				},
 				openMultiple: function (connection, map, callback) {
 					if (Array.isArray(map)) {
 						// Create an object equivalent, and convert back to an array afterwards
@@ -479,6 +489,7 @@ function createClass(config, constructor, proto) {
 						});
 					}
 					var newMap = {};
+					var resultsKeys = {};
 					var cachedResults = {};
 					for (var mapKey in map) {
 						var keyValues = Array.isArray(map[mapKey]) ? map[mapKey] : [map[mapKey]];
@@ -487,21 +498,30 @@ function createClass(config, constructor, proto) {
 						if (keyJson in objectCache) {
 							cachedResults[mapKey] = objectCache[keyJson];
 						} else {
-							newMap[mapKey] = map[mapKey];
+							resultsKeys[mapKey] = keyJson;
+							newMap[keyJson] = map[mapKey];
 						}
 					}
 					if (Object.keys(newMap).length === 0) {
 						return callback(null, cachedResults);
 					}
+					for (var key in laterOpenParams) {
+						newMap[key] = laterOpenParams[key];
+					}
+					laterOpenParams = {};
 				
 					return NewClass.openMultiple.call(this, connection, newMap, function (err, results) {
 						if (err) {
 							return callback(err);
 						}
+						var newResults = {};
 						for (var key in cachedResults) {
-							results[key] = cachedResults[key];
+							newResults[key] = cachedResults[key];
 						}
-						callback(null, results);
+						for (var mapKey in resultsKeys) {
+							newResults[mapKey] = results[resultsKeys[mapKey]];
+						}
+						callback(null, newResults);
 					});
 				},
 				open: function (connection) {
@@ -527,6 +547,7 @@ function createClass(config, constructor, proto) {
 					if (keyJson in objectCache) {
 						return objectCache[keyJson];
 					} else {
+						delete laterOpenParams[keyJson];
 						return objectCache[keyJson] = NewClass.fromRow(row);
 					}
 				}
