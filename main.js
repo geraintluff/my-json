@@ -450,6 +450,35 @@ function createClass(config, constructor, proto) {
 			}
 			return result;
 		},
+		cacheWithPool: function (mysqlPool) {
+			var result = this.cache();
+			function wrapFunction(origFunc) {
+				return function () {
+					var thisClass= this;
+					var args = Array.prototype.slice.call(arguments, 0);
+					var callback = args[args.length - 1];
+					mysqlPool.getConnection(function (err, connection) {
+						if (err) {
+							return callback(err);
+						}
+						args.unshift(connection);
+						// Override callback to release connection first
+						args[args.length - 1] = function () {
+							connection.release();
+							return callback.apply(this, arguments);
+						};
+						origFunc.apply(thisClass, args);
+					});
+					return this;
+				};
+			}
+			result.search = wrapFunction(result.search);
+			result.save = wrapFunction(result.save);
+			result.remove = wrapFunction(result.remove);
+			result.open = wrapFunction(result.open);
+			result.openMultiple = wrapFunction(result.openMultiple);
+			return result;
+		},
 		cacheWith: function (mysqlConnection) {
 			var result = this.cache();
 			result.search = result.search.bind(result, mysqlConnection);
@@ -616,6 +645,9 @@ publicApi.sqlMatchPattern = function (sql, pattern) {
 	}
 	return true;
 };
+
+// TODO: errors
+
 // Not a general-purpose fake - just enough to cover everything MyJSON uses
 function FakeConnection (queryMethod) {
 	if (!(this instanceof FakeConnection)) {
@@ -634,6 +666,21 @@ function FakeConnection (queryMethod) {
 	}
 };
 publicApi.FakeConnection = FakeConnection;
+
+// Not a general-purpose pool - just enough to cover everything MyJSON uses
+function FakePool (queryMethod) {
+	if (!(this instanceof FakePool)) {
+		return new FakePool(queryMethod);
+	}
+	this.getConnection = function (callback) {
+		process.nextTick(function () {
+			var connection = new FakeConnection(queryMethod);
+			connection.release = function () {};
+			callback(null, connection);
+		});
+	}
+};
+publicApi.FakePool = FakePool;
 
 function ClassGroup(configs) {
 	if (!(this instanceof ClassGroup)) {
