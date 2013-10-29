@@ -350,8 +350,23 @@ function createClass(config, constructor, proto) {
 				var column = config.writeColumns[i];
 				var isKeyColumn = config.keyColumns.indexOf(column) !== -1;
 				var key = config.deconstructColumn(column, false);
+				if (key.type === 'reference') {
+					var refConfig = config.columns[column];
+					var refValue = jsonPointer.has(obj, key.path) ? jsonPointer.get(obj, key.path) : undefined;
+					for (var refKey in refConfig.columns) {
+						var refKeySplit = config.deconstructColumn(refKey, false);
+						var refAlias = refConfig.columns[refKey];
+						var value = null;
+						if (typeof refValue !== 'undefined') {
+							value = getParameterValue(refValue, refKeySplit);
+						}
+						updateObj[refAlias] = value;
+					}
+					continue;
+				}
+				// simple value column
 				var alias = config.columnForPath(key.path, key.type);
-				if (!jsonPointer.has(obj, key.path) || typeof (value = jsonPointer.get(obj, key.path)) === 'undefined') {
+				if (!jsonPointer.has(obj, key.path) || typeof (jsonPointer.get(obj, key.path)) === 'undefined') {
 					if (isKeyColumn && !forceInsert) {
 						missingKeyColumns.push(column);
 					} else {
