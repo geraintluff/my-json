@@ -10,9 +10,18 @@ describe('Class groups', function () {
 					'integer/id': 'id',
 					'string/name': 'name'
 				}
+			},
+			TestClass2: {
+				table: 'TestTable2',
+				columns: {
+					'integer/id': 'id',
+					'string/name': 'name'
+				}
 			}
 		});
 		
 		assert.isFunction(classes.TestClass);
+		assert.isFunction(classes.TestClass2);
+		assert.notEqual(classes.TestClass, classes.TestClass2);
 	});
 });

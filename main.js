@@ -1,3 +1,4 @@
+var async = require('async');
 var mysql = require('mysql');
 var jsonPointer = require('json-pointer');
 
@@ -91,6 +92,30 @@ Config.prototype = {
 	}
 };
 
+function PendingRequests(addFunction, runFunction) {
+	this.requests = {};
+	this.addFunction = addFunction || function (type, params, callback) {
+		callback(new Error('Cannot run pending request (from reference) outside of a group'));
+	};
+	this.runFunction = runFunction || function (connection, type, params, callback) {
+		callback(new Error('Cannot run pending request (from reference) outside of a group'));
+	};
+}
+PendingRequests.prototype = {
+	add: function (type, params, callback) {
+		this.requests[type] = this.requests[type] || [];
+		this.requests[type].push(this.addFunction(type, params, callback));
+	},
+	run: function (connection, callback) {
+		var thisPending = this;
+		async.map(Object.keys(this.requests), function (key, callback) {
+			var paramList = thisPending.requests[key];
+			delete thisPending.requests[key];
+			return thisPending.runFunction(connection, key, paramList, callback);
+		}, callback);
+	}
+};
+
 function createClass(config, constructor, proto) {
 	if (!(config instanceof Config)) {
 		config = new Config(config);
@@ -164,8 +189,76 @@ function createClass(config, constructor, proto) {
 		}
 		return schema;
 	}
+	function setResultValue(result, value, key, errors) {
+		if (value === null || typeof value === 'undefined') {
+			return;
+		}
+		if (key.type === 'boolean') {
+			value = !!value;
+		} else if (key.type === 'number') {
+			value = parseFloat(value);
+		} else if (key.type === 'integer') {
+			value = parseInt(value, 10);
+		} else if (key.type === 'string') {
+			value = "" + value;
+		} else if (key.type === 'json') {
+			try {
+				value = JSON.parse(value);
+			} catch (e) {
+				errors.push(e);
+			}
+		} else {
+			errors.push(new Error('Unknown column type: ' + key.type));
+		}
+		if (key.path) {
+			jsonPointer.set(result, key.path, value);
+		} else if (typeof value === 'object' && !Array.isArray(value)) {
+			for (var key in value) {
+				result[key] = value[key];
+			}
+		} else {
+			errors.push(new Error("Cannot load non-object into root value"));
+		}
+	}
+	function getParameterValue(obj, key) {
+		var value = jsonPointer.get(obj, key.path);
+		if (key.type === 'boolean') {
+			if (typeof value === 'boolean') {
+				value = value ? 1 : 0;
+			} else {
+				value = null;
+			}
+		} else if (key.type === 'integer') {
+			if (typeof value !== 'number' || Math.floor(value) !== value) {
+				value = null;
+			}
+		} else if (key.type === 'number') {
+			if (typeof value !== 'number') {
+				value = null;
+			}
+		} else if (key.type === 'string') {
+			if (typeof value !== 'string') {
+				value = null;
+			}
+		} else if (key.type === 'json') {
+			value = JSON.stringify(value);
+		} else {
+			throw new Error('Unknown column type: ' + key.type);
+		}
+		return value;
+	}
+	
+	NewClass.pendingRequests = new PendingRequests();
 	
 	var staticMethods = {
+		paramsFromObject: function (obj) {
+			var params = [];
+			for (var i = 0; i < config.keyColumns.length; i++) {
+				var splitKey = config.deconstructColumn(config.keyColumns[i]);
+				params[i] = getParameterValue(obj, splitKey);
+			}
+			return params;
+		},
 		sqlFromSchema: function (schema) {
 			var condition = SchemaCondition.fromSchema(schema, config);
 			var table = initialTableName;
@@ -202,11 +295,7 @@ function createClass(config, constructor, proto) {
 				var resultsMap = {};
 				for (var resultNumber = 0; resultNumber < results.length; resultNumber++) {
 					var obj = results[resultNumber];
-					var key = [];
-					for (var i = 0; i < config.keyColumns.length; i++) {
-						var splitKey = config.deconstructColumn(config.keyColumns[i]);
-						key[i] = jsonPointer.get(obj, splitKey.path);
-					}
+					var key = thisClass.paramsFromObject(obj);
 					var keyJson = JSON.stringify(key); // all scalar values, so this is deterministic
 					resultsMap[keyJson] = obj;
 				}
@@ -237,7 +326,9 @@ function createClass(config, constructor, proto) {
 				for (var i = 0; i < results.length; i++) {
 					results[i] = thisClass.fromRow(results[i]);
 				}
-				callback(null, results);
+				thisClass.pendingRequests.run(connection, function (err) {
+					callback(err, results);
+				});
 			});
 			return this;
 		},
@@ -247,12 +338,10 @@ function createClass(config, constructor, proto) {
 				callback = forceInsert;
 				forceInsert = undefined;
 			}
-			try {
-				var remainderObject = JSON.parse(JSON.stringify(obj)); // Copy, and also ensure it's JSON-friendly
-			} catch (e) {
-				console.log(obj);
-				console.log(JSON.stringify(obj));
+			if (typeof obj === 'undefined') {
+				throw new TypeError('Cannot save undefined value');
 			}
+			var remainderObject = JSON.parse(JSON.stringify(obj)); // Copy, and also ensure it's JSON-friendly
 			var updateObj = {};
 			var wherePairs = [];
 			var missingKeyColumns = [];
@@ -270,32 +359,8 @@ function createClass(config, constructor, proto) {
 					}
 					continue;
 				}
-				var value = jsonPointer.get(remainderObject, key.path);
+				var value = getParameterValue(remainderObject, key);
 				jsonPointer.set(remainderObject, key.path, undefined);
-				if (key.type === 'boolean') {
-					if (typeof value === 'boolean') {
-						value = value ? 1 : 0;
-					} else {
-						value = null;
-					}
-				} else if (key.type === 'integer') {
-					if (typeof value !== 'number' || Math.floor(value) !== value) {
-						value = null;
-					}
-				} else if (key.type === 'number') {
-					if (typeof value !== 'number') {
-						value = null;
-					}
-				} else if (key.type === 'string') {
-					if (typeof value !== 'string') {
-						value = null;
-					}
-				} else if (key.type === 'json') {
-					value = JSON.stringify(value);
-				} else {
-					throw new Error('Unknown column type: ' + key.type);
-					continue;
-				}
 				if (isKeyColumn && !forceInsert) {
 					var pair = mysql.escapeId(alias) + "=" + mysql.escape(value);
 					wherePairs.push(pair);
@@ -359,34 +424,10 @@ function createClass(config, constructor, proto) {
 				var isKeyColumn = config.keyColumns.indexOf(column) !== -1;
 				var key = config.deconstructColumn(column, false);
 				var alias = config.columnForPath(key.path, key.type);
-				var value;
-				if (!jsonPointer.has(obj, key.path) || typeof (value = jsonPointer.get(obj, key.path)) === 'undefined') {
+				if (!jsonPointer.has(obj, key.path) || typeof (jsonPointer.get(obj, key.path)) === 'undefined') {
 					throw new Error('Cannot delete object missing key columns');
 				}
-				if (key.type === 'boolean') {
-					if (typeof value === 'boolean') {
-						value = value ? 1 : 0;
-					} else {
-						value = null;
-					}
-				} else if (key.type === 'integer') {
-					if (typeof value !== 'number' || Math.floor(value) !== value) {
-						value = null;
-					}
-				} else if (key.type === 'number') {
-					if (typeof value !== 'number') {
-						value = null;
-					}
-				} else if (key.type === 'string') {
-					if (typeof value !== 'string') {
-						value = null;
-					}
-				} else if (key.type === 'json') {
-					value = JSON.stringify(value);
-				} else {
-					throw new Error('Unknown column type: ' + key.type);
-					continue;
-				}
+				var value = getParameterValue(obj, key);
 				var pair = mysql.escapeId(alias) + "=" + mysql.escape(value);
 				wherePairs.push(pair);
 			}
@@ -407,41 +448,26 @@ function createClass(config, constructor, proto) {
 			var result = new NewClass();
 			var errors = [];
 			for (var i = 0; i < config.readColumns.length; i++) {
-				var key = config.deconstructColumn(config.readColumns[i], 'read');
+				var key = config.deconstructColumn(config.readColumns[i]);
+				if (key.type === 'reference') {
+					var spec = config.columns[config.readColumns[i]];
+					var params = {};
+					for (var refColumn in spec.columns) {
+						var refKey = config.deconstructColumn(refColumn, false);
+						setResultValue(params, row[spec.columns[refColumn]], refKey, errors);
+					}
+					jsonPointer.set(result, key.path, params);
+					this.pendingRequests.add(spec.type, params, function (refResult) {
+						jsonPointer.set(result, key.path, refResult);
+					});
+					continue;
+				}
 				var rowKey = config.columnForPath(key.path, key.type);
 				if (!Object.prototype.hasOwnProperty.call(row, rowKey)) {
 					continue;
 				}
 				var value = row[rowKey];
-				if (value === null || typeof value === 'undefined') {
-					continue;
-				}
-				if (key.type === 'boolean') {
-					value = !!value;
-				} else if (key.type === 'number') {
-					value = parseFloat(value);
-				} else if (key.type === 'integer') {
-					value = parseInt(value, 10);
-				} else if (key.type === 'string') {
-					value = "" + value;
-				} else if (key.type === 'json') {
-					try {
-						value = JSON.parse(value);
-					} catch (e) {
-						errors.push(e);
-					}
-				} else {
-					throw new Error('Unknown column type: ' + key.type);
-				}
-				if (key.path) {
-					jsonPointer.set(result, key.path, value);
-				} else if (typeof value === 'object' && !Array.isArray(value)) {
-					for (var key in value) {
-						result[key] = value[key];
-					}
-				} else {
-					errors.push(new Error("Cannot load non-object into root value"));
-				}
+				value = setResultValue(result, row[rowKey], key, errors);
 			}
 			if (errors.length) {
 				console.log(row);
@@ -477,6 +503,7 @@ function createClass(config, constructor, proto) {
 			result.remove = wrapFunction(result.remove);
 			result.open = wrapFunction(result.open);
 			result.openMultiple = wrapFunction(result.openMultiple);
+			result.forceQuery = wrapFunction(result.forceQuery);
 			return result;
 		},
 		cacheWith: function (mysqlConnection) {
@@ -486,20 +513,37 @@ function createClass(config, constructor, proto) {
 			result.remove = result.remove.bind(result, mysqlConnection);
 			result.open = result.open.bind(result, mysqlConnection);
 			result.openMultiple = result.openMultiple.bind(result, mysqlConnection);
+			result.forceQuery = result.forceQuery.bind(result, mysqlConnection);
 			return result;
 		},
 		cache: function () {
 			var objectCache = {};
 			
 			var laterOpenParams = {};
+			var openCallbacks = {};
 			var cacheMethods = {
+				forceQuery: function (connection, callback) {
+					return cacheMethods.openMultiple.call(this, connection, laterOpenParams, callback);
+				},
 				openLater: function () {
-					var keyValues = normaliseKeyValues(arguments);
+					var args = Array.prototype.slice.call(arguments, 0);
+					var callback = null;
+					if (typeof args[args.length - 1] === 'function') {
+						callback = args.pop()
+					}
+					var keyValues = normaliseKeyValues(args);
 					var keyJson = JSON.stringify(keyValues);
 					if (keyJson in objectCache) {
+						if (callback) {
+							process.nextTick(callback.bind(null, objectCache[keyJson]));
+						}
 						return;
 					}
 					laterOpenParams[keyJson] = keyValues;
+					if (callback) {
+						openCallbacks[keyJson] = openCallbacks[keyJson] || [];
+						openCallbacks[keyJson].push(callback);
+					}
 					return this;
 				},
 				openMultiple: function (connection, map, callback) {
@@ -532,7 +576,8 @@ function createClass(config, constructor, proto) {
 						}
 					}
 					if (Object.keys(newMap).length === 0) {
-						return callback(null, cachedResults);
+						process.nextTick(callback.bind(null, null, cachedResults));
+						return this;
 					}
 					for (var key in laterOpenParams) {
 						newMap[key] = laterOpenParams[key];
@@ -571,13 +616,22 @@ function createClass(config, constructor, proto) {
 					var keyJson = JSON.stringify(key); // all scalar values, so this is deterministic
 					if (keyJson === '[]') {
 						// Nothing to cache, or all key columns undefined
-						return NewClass.fromRow(row);
+						return NewClass.fromRow.call(this, row);
 					}
 					if (keyJson in objectCache) {
 						return objectCache[keyJson];
 					} else {
 						delete laterOpenParams[keyJson];
-						return objectCache[keyJson] = NewClass.fromRow(row);
+						var result = NewClass.fromRow.call(this, row);
+						objectCache[keyJson] = result;
+						if (openCallbacks[keyJson]) {
+							while (openCallbacks[keyJson].length > 0) {
+								var callback = openCallbacks[keyJson].shift();
+								callback(result);
+							}
+							delete openCallbacks[keyJson];
+						}
+						return result;
 					}
 				}
 			};
@@ -585,6 +639,7 @@ function createClass(config, constructor, proto) {
 			function Cache() {
 				return NewClass.apply(this, arguments);
 			}
+			Cache.pendingRequests = NewClass.pendingRequests;
 			Cache.prototype = Object.create(NewClass.prototype);
 			for (var key in staticMethods) {
 				Cache[key] = staticMethods[key];
@@ -668,14 +723,22 @@ function FakeConnection (queryMethod) {
 publicApi.FakeConnection = FakeConnection;
 
 // Not a general-purpose pool - just enough to cover everything MyJSON uses
-function FakePool (queryMethod) {
+function FakePool (queryMethod, maxConnections) {
 	if (!(this instanceof FakePool)) {
-		return new FakePool(queryMethod);
+		return new FakePool(queryMethod, maxConnections);
 	}
+	maxConnections = maxConnections || 1;
+	var connectionCount = 0;
 	this.getConnection = function (callback) {
 		process.nextTick(function () {
+			connectionCount++;
+			if (connectionCount > maxConnections) {
+				throw new Error('Exceeded maximum connection limit: ' + maxConnections);
+			}
 			var connection = new FakeConnection(queryMethod);
-			connection.release = function () {};
+			connection.release = function () {
+				connectionCount--;
+			};
 			callback(null, connection);
 		});
 	}
@@ -686,14 +749,57 @@ function ClassGroup(configs) {
 	if (!(this instanceof ClassGroup)) {
 		return new ClassGroup(configs);
 	}
+	var thisGroup = this;
+	this.classes = {};
+	var pendingRequests = new PendingRequests(function (key, params, callback) {
+		var keyClass = thisGroup[key];
+		return {
+			params: keyClass.paramsFromObject(params),
+			callback: callback
+		};
+	}, function (connection, key, params, callback) {
+		var keyClass = thisGroup[key];
+		var paramList = [];
+		var callbackList = [];
+		for (var i = 0; i < params.length; i++) {
+			paramList.push(params[i].params);
+			callbackList.push(params[i].callback);
+		}
+		keyClass.openMultiple(connection, paramList, function (err, resultList) {
+			if (err) {
+				return callback(err);
+			}
+			for (var i = 0; i < callbackList.length; i++) {
+				var resultCallback = callbackList[i];
+				resultCallback(resultList[i]);
+			}
+			callback(null);
+		});
+	});
 	this.addClass = function (key, config) {
-		this[key] = createClass(config);
+		this[key] = this.classes[key] = createClass(config);
+		this[key].pendingRequests = pendingRequests;
 	};
 	for (var key in configs) {
 		this.addClass(key, configs[key]);
 	}
 }
-ClassGroup.prototype = {};
+ClassGroup.prototype = {
+	cacheWithPool: function (mysqlPool) {
+		var cached = {};
+		for (var key in this.classes) {
+			cached[key] = this[key].cacheWithPool(mysqlPool);
+		}
+		return cached;
+	},
+	cacheWith: function (connection) {
+		var cached = {};
+		for (var key in this.classes) {
+			cached[key] = this[key].cacheWith(connection);
+		}
+		return cached;
+	}
+};
 
 publicApi.group = ClassGroup;
 
