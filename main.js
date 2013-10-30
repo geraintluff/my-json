@@ -476,6 +476,9 @@ function createClass(config, constructor, proto) {
 						jsonPointer.set(result, key.path, refResult);
 					});
 					continue;
+				} else if (key.type === 'array') {
+					var spec = config.columns[config.readColumns[i]];
+					continue;
 				}
 				var rowKey = config.columnForPath(key.path, key.type);
 				if (!Object.prototype.hasOwnProperty.call(row, rowKey)) {
@@ -487,7 +490,8 @@ function createClass(config, constructor, proto) {
 			if (errors.length) {
 				console.log(row);
 				console.log(value);
-				throw new Error(errors, row, value);
+				console.log(errors);
+				throw errors[0];
 			}
 			return result;
 		},
