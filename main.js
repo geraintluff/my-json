@@ -833,5 +833,6 @@ ClassGroup.prototype = {
 };
 
 publicApi.group = ClassGroup;
+publicApi.Promise = Promise; // Allows extension of Promise behaviour
 
 module.exports = publicApi;
