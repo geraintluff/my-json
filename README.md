@@ -119,3 +119,9 @@ newObj.id; // populated using the auto-increment, if there is one
 TestClass.remove(connection, testObj, function (err, results) {...});
 BoundTestClass.remove(testObj, function (err, results) {...});
 ```
+
+### Promises
+
+For the above methods/functions that take a callback as a final argument, the callback can be omitted.
+
+If the callback is omitted, then a Promise object is returned instead (from [this module](https://npmjs.org/package/promise)).
