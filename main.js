@@ -1,6 +1,18 @@
 var async = require('async');
 var mysql = require('mysql');
 var jsonPointer = require('json-pointer');
+var Promise = require('promise');
+
+function makePromiseCompatible(method) {
+	var denodified = Promise.denodeify(method);
+	return function () {
+		if (typeof arguments[arguments.length - 1] === 'function') {
+			return method.apply(this, arguments);
+		} else {
+			return denodified.apply(this, arguments);
+		}
+	};
+}
 
 /* Workaround for current version of json-pointer */
 jsonPointer.remove = jsonPointer.remove || function (obj, path) {
@@ -264,7 +276,7 @@ function createClass(config, constructor, proto) {
 			var table = initialTableName;
 			return 'SELECT ' + table + '.*\n\tFROM ' + escapedTable + ' ' + table + '\n\tWHERE ' + condition.sqlWhere(table, false, '\t').replace(/\n/g, '\n\t');
 		},
-		openMultiple: function (connection, map, callback) {
+		openMultiple: makePromiseCompatible(function (connection, map, callback) {
 			if (Array.isArray(map)) {
 				// Create an object equivalent, and convert back to an array afterwards
 				var newMap = {};
@@ -305,8 +317,8 @@ function createClass(config, constructor, proto) {
 				}
 				callback(null, result);
 			});
-		},
-		open: function (connection) {
+		}),
+		open: makePromiseCompatible(function (connection) {
 			var callback = arguments[arguments.length - 1];
 			var keyValues = Array.prototype.slice.call(arguments, 1, arguments.length - 1);
 			return staticMethods.openMultiple.call(this, connection, {single: keyValues}, function (err, results) {
@@ -315,8 +327,8 @@ function createClass(config, constructor, proto) {
 				}
 				callback(null, results.single);
 			});
-		},
-		search:  function (connection, schema, callback) {
+		}),
+		search:  makePromiseCompatible(function (connection, schema, callback) {
 			var thisClass = this;
 			var sql = this.sqlFromSchema(schema);
 			connection.query(sql, function (error, results) {
@@ -331,8 +343,8 @@ function createClass(config, constructor, proto) {
 				});
 			});
 			return this;
-		},
-		save: function (connection, obj, forceInsert, callback) {
+		}),
+		save: makePromiseCompatible(function (connection, obj, forceInsert, callback) {
 			var thisClass = this;
 			if (typeof forceInsert === 'function') {
 				callback = forceInsert;
@@ -428,8 +440,8 @@ function createClass(config, constructor, proto) {
 				});
 			}
 			return this;
-		},
-		remove: function (connection, obj, callback) {
+		}),
+		remove: makePromiseCompatible(function (connection, obj, callback) {
 			var updateObj = {};
 			var wherePairs = [];
 			var missingKeyColumns = [];
@@ -458,7 +470,7 @@ function createClass(config, constructor, proto) {
 				callback(null, result);
 			});
 			return this;
-		},
+		}),
 		fromRow: function (row) {
 			var result = new NewClass();
 			var errors = [];
@@ -498,7 +510,7 @@ function createClass(config, constructor, proto) {
 		cacheWithPool: function (mysqlPool) {
 			var result = this.cache();
 			function wrapFunction(origFunc) {
-				return function () {
+				return makePromiseCompatible(function () {
 					var thisClass= this;
 					var args = Array.prototype.slice.call(arguments, 0);
 					var callback = args[args.length - 1];
@@ -515,7 +527,7 @@ function createClass(config, constructor, proto) {
 						origFunc.apply(thisClass, args);
 					});
 					return this;
-				};
+				});
 			}
 			result.search = wrapFunction(result.search);
 			result.save = wrapFunction(result.save);
@@ -541,10 +553,10 @@ function createClass(config, constructor, proto) {
 			var laterOpenParams = {};
 			var openCallbacks = {};
 			var cacheMethods = {
-				forceQuery: function (connection, callback) {
+				forceQuery: makePromiseCompatible(function (connection, callback) {
 					return cacheMethods.openMultiple.call(this, connection, laterOpenParams, callback);
-				},
-				openLater: function () {
+				}),
+				openLater: makePromiseCompatible(function () {
 					var args = Array.prototype.slice.call(arguments, 0);
 					var callback = null;
 					if (typeof args[args.length - 1] === 'function') {
@@ -564,8 +576,8 @@ function createClass(config, constructor, proto) {
 						openCallbacks[keyJson].push(callback);
 					}
 					return this;
-				},
-				openMultiple: function (connection, map, callback) {
+				}),
+				openMultiple: makePromiseCompatible(function (connection, map, callback) {
 					if (Array.isArray(map)) {
 						// Create an object equivalent, and convert back to an array afterwards
 						var newMap = {};
@@ -616,8 +628,8 @@ function createClass(config, constructor, proto) {
 						}
 						callback(null, newResults);
 					});
-				},
-				open: function (connection) {
+				}),
+				open: makePromiseCompatible(function (connection) {
 					var callback = arguments[arguments.length - 1];
 					var keyValues = Array.prototype.slice.call(arguments, 1, arguments.length - 1);
 					return cacheMethods.openMultiple.call(this, connection, {single: keyValues}, function (err, results) {
@@ -626,7 +638,7 @@ function createClass(config, constructor, proto) {
 						}
 						callback(null, results.single);
 					});
-				},
+				}),
 				fromRow: function (row) {
 					var key = [];
 					for (var i = 0; i < config.sqlKeyColumns.length; i++) {
