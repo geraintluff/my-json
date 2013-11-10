@@ -227,4 +227,59 @@ describe('Simple reading', function () {
 			done(error);
 		});
 	});
+	
+	it('limits (limit)', function (done) {
+		
+		var TestClass = myJson({
+			table: 'TestTable',
+			columns: {
+				'integer/id': 'id_column',
+				'string/name': 'name_column'
+			}
+		});
+		
+		var fakeConnection = myJson.FakeConnection(function (sql, callback) {
+			assert.isTrue(myJson.sqlMatchPattern(sql, 'SELECT {t}.* FROM `TestTable` {t} WHERE 1 LIMIT 20'), sql);
+			setTimeout(function () {
+				callback(null, [{id_column: 5, name_column: 'test'}]);
+			}, 10);
+		});
+		
+		TestClass.search(fakeConnection, {}, {
+			limit: 20
+		}, function (error, results) {
+			assert.lengthOf(results, 1);
+			assert.instanceOf(results[0], TestClass);
+			assert.deepEqual(results[0], {id: 5, name: 'test'});
+			done(error);
+		});
+	});
+
+	it('limits (limit/offset)', function (done) {
+		
+		var TestClass = myJson({
+			table: 'TestTable',
+			columns: {
+				'integer/id': 'id_column',
+				'string/name': 'name_column'
+			}
+		});
+		
+		var fakeConnection = myJson.FakeConnection(function (sql, callback) {
+			assert.isTrue(myJson.sqlMatchPattern(sql, 'SELECT {t}.* FROM `TestTable` {t} WHERE 1 LIMIT 10, 20'), sql);
+			setTimeout(function () {
+				callback(null, [{id_column: 5, name_column: 'test'}]);
+			}, 10);
+		});
+		
+		TestClass.search(fakeConnection, {}, {
+			limit: 20,
+			offset: 10
+		}, function (error, results) {
+			assert.lengthOf(results, 1);
+			assert.instanceOf(results[0], TestClass);
+			assert.deepEqual(results[0], {id: 5, name: 'test'});
+			done(error);
+		});
+	});
 });

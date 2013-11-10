@@ -51,6 +51,9 @@ function Config(obj) {
 		} else {
 			this.sqlKeyColumns.push(column);
 		}
+		if (!this.columns[column]) {
+			this.writeOnly[column] = entry;
+		}
 	}
 	this.readColumns = Object.keys(this.columns).concat(Object.keys(this.readOnly));
 	this.writeColumns = Object.keys(this.columns).concat(Object.keys(this.writeOnly));
@@ -136,6 +139,13 @@ function createClass(config, constructor, proto) {
 		proto = constructor;
 		constructor = undefined;
 	}
+	constructor = constructor || function (model) {
+		for (var key in model) {
+			this[key] = model[key];
+		}
+	};
+	proto = proto || Object.create(constructor.prototype);
+
 	// TODO: use tv4 to validate config
 	var escapedTable = mysql.escapeId(config.table);
 	var initialTableName = "";
@@ -150,23 +160,9 @@ function createClass(config, constructor, proto) {
 				this[key] = model[key];
 			}
 			
-			var _super = {};
-			for (var key in proto) {
-				_super[key] = proto[key].bind(this);
-			}
-			var args = [];
-			while (args.length < arguments.length) {
-				args[args.length] = arguments.length;
-			}
-			args.unshift(_super);
-			return constructor.apply(this, args);
+			return constructor.apply(this, arguments);
 		}
 	} else {
-		NewClass = function (model) {
-			for (var key in model) {
-				this[key] = model[key];
-			}
-		};
 	}
 	NewClass.prototype = proto || {};
 	
@@ -279,10 +275,19 @@ function createClass(config, constructor, proto) {
 			}
 			return params;
 		},
-		sqlFromSchema: function (schema) {
+		sqlFromSchema: function (schema, ordering) {
 			var condition = SchemaCondition.fromSchema(schema, config);
 			var table = initialTableName;
-			return 'SELECT ' + table + '.*\n\tFROM ' + escapedTable + ' ' + table + '\n\tWHERE ' + condition.sqlWhere(table, false, '\t').replace(/\n/g, '\n\t');
+			var result = 'SELECT ' + table + '.*\n\tFROM ' + escapedTable + ' ' + table;
+			result += '\n\tWHERE ' + condition.sqlWhere(table, false, '\t').replace(/\n/g, '\n\t');
+			if (ordering && ordering.limit) {
+				if (ordering.offset) {
+					result += '\n\LIMIT ' + Math.round(ordering.offset) + ", " + Math.round(ordering.limit);
+				} else {
+					result += '\n\LIMIT ' + Math.round(ordering.limit);
+				}
+			}
+			return result;
 		},
 		openMultiple: makePromiseCompatible(function (connection, map, callback) {
 			if (Array.isArray(map)) {
@@ -336,11 +341,16 @@ function createClass(config, constructor, proto) {
 				callback(null, results.single);
 			});
 		}),
-		search:  makePromiseCompatible(function (connection, schema, callback) {
+		search:  makePromiseCompatible(function (connection, schema, ordering, callback) {
+			if (typeof ordering === 'function') {
+				callback = ordering;
+				ordering = null;
+			}
 			var thisClass = this;
-			var sql = this.sqlFromSchema(schema);
+			var sql = this.sqlFromSchema(schema, ordering);
 			connection.query(sql, function (error, results) {
 				if (error) {
+					error.sqlQuery = sql;
 					return callback(error);
 				}
 				for (var i = 0; i < results.length; i++) {
@@ -411,6 +421,7 @@ function createClass(config, constructor, proto) {
 				var sql = 'UPDATE ' + escapedTable + '\n\tSET ' + updatePairs.join(',\n\t') + '\nWHERE ' + wherePairs.join(' AND ');
 				connection.query(sql, function (err, result) {
 					if (err) {
+						err.sqlQuery = sql;
 						return callback(err);
 					}
 					if (result.affectedRows || forceInsert === false) {
@@ -439,6 +450,7 @@ function createClass(config, constructor, proto) {
 				var sql = 'INSERT INTO ' + escapedTable + ' (' + insertColumns.join(', ') + ') VALUES (\n\t' + insertValues.join(',\n\t') + ')';
 				connection.query(sql, function (err, result) {
 					if (err) {
+						err.sqlQuery = sql;
 						return callback(err);
 					}
 					if (keyColumn) {
@@ -469,6 +481,7 @@ function createClass(config, constructor, proto) {
 			var sql = 'DELETE FROM ' + escapedTable + ' WHERE ' + wherePairs.join(' AND ');
 			connection.query(sql, function (err, result) {
 				if (err) {
+					err.sqlQuery = sql;
 					return callback(err);
 				}
 				for (var i = 0; i < config.keyColumns.length; i++) {
@@ -816,7 +829,7 @@ function ClassGroup(configs) {
 		});
 	});
 	this.addClass = function (key, config) {
-		this[key] = this.classes[key] = createClass(config);
+		this[key] = this.classes[key] = createClass(config, config.extend);
 		this[key].pendingRequests = pendingRequests;
 	};
 	for (var key in configs) {
@@ -842,5 +855,9 @@ ClassGroup.prototype = {
 
 publicApi.group = ClassGroup;
 publicApi.Promise = Promise; // Allows extension of Promise behaviour
+
+publicApi.settings = {
+	dumpSql: true
+};
 
 module.exports = publicApi;
