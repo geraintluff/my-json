@@ -1,6 +1,6 @@
 {
   "name": "my-json",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Using MySQL databases as JSON stores",
   "author": "Geraint Luff",
   "keywords": [
