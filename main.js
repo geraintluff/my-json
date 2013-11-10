@@ -37,6 +37,8 @@ function Config(obj) {
 	this.columns = obj.columns;
 	this.readOnly = obj.readOnly || {};
 	this.writeOnly = obj.writeOnly || {};
+
+	this.createColumns = Object.keys(this.columns).concat(Object.keys(this.readOnly)).concat(Object.keys(this.writeOnly));
 	
 	this.keyColumns = obj.keyColumn || obj.keyColumns || [];
 	this.keyColumns = Array.isArray(this.keyColumns) ? this.keyColumns : [this.keyColumns];
@@ -65,6 +67,10 @@ function Config(obj) {
 	this.writeColumns.sort(function (a, b) {
 		return b.length - a.length;
 	});
+	// Write-order: longest first
+	this.createColumns.sort(function (a, b) {
+		return b.length - a.length;
+	});
 	
 	for (var key in this.readOnly) {
 		this.columns[key] = this.columns[key] || this.readOnly[key];
@@ -76,11 +82,12 @@ function Config(obj) {
 Config.prototype = {
 	columnForPath: function (dataPath, type) {
 		var columnKey = (type || "") + dataPath;
-		if (this.columns[columnKey]) {
-			if (typeof this.columns[columnKey] === 'object') {
-				return this.columns[columnKey].alias || columnKey;
-			} else if (typeof this.columns[columnKey] === 'string') {
-				return this.columns[columnKey];
+		var entry = this.columns[columnKey] || this.readOnly[columnKey];
+		if (entry) {
+			if (typeof entry === 'object') {
+				return entry.alias || columnKey;
+			} else if (typeof entry === 'string') {
+				return entry;
 			} else {
 				return columnKey;
 			}
@@ -371,94 +378,109 @@ function createClass(config, constructor, proto) {
 			if (typeof obj === 'undefined') {
 				throw new TypeError('Cannot save undefined value');
 			}
-			var remainderObject = JSON.parse(JSON.stringify(obj)); // Copy, and also ensure it's JSON-friendly
-			var updateObj = {};
-			var wherePairs = [];
-			var missingKeyColumns = [];
-			// Longest first
-			for (var i = 0; i < config.writeColumns.length; i++) {
-				var column = config.writeColumns[i];
-				var isKeyColumn = config.keyColumns.indexOf(column) !== -1;
-				var key = config.deconstructColumn(column, false);
-				if (key.type === 'reference') {
-					var refConfig = config.columns[column];
-					var refValue = jsonPointer.has(obj, key.path) ? jsonPointer.get(obj, key.path) : undefined;
-					for (var refKey in refConfig.columns) {
-						var refKeySplit = config.deconstructColumn(refKey, false);
-						var refAlias = refConfig.columns[refKey];
-						var value = null;
-						if (typeof refValue !== 'undefined') {
-							value = getParameterValue(refValue, refKeySplit);
+			function assembleUpdate(obj, columnList) {
+				var remainderObject = JSON.parse(JSON.stringify(obj)); // Copy, and also ensure it's JSON-friendly
+				var updateObj = {};
+				var wherePairs = [];
+				var missingKeyColumns = [];
+				for (var i = 0; i < columnList.length; i++) {
+					var column = columnList[i];
+					var isKeyColumn = config.keyColumns.indexOf(column) !== -1;
+					var key = config.deconstructColumn(column, false);
+					if (key.type === 'reference') {
+						var refConfig = config.columns[column];
+						var refValue = jsonPointer.has(obj, key.path) ? jsonPointer.get(obj, key.path) : undefined;
+						for (var refKey in refConfig.columns) {
+							var refKeySplit = config.deconstructColumn(refKey, false);
+							var refAlias = refConfig.columns[refKey];
+							var value = null;
+							if (typeof refValue !== 'undefined') {
+								value = getParameterValue(refValue, refKeySplit);
+							}
+							updateObj[refAlias] = value;
 						}
-						updateObj[refAlias] = value;
+						continue;
 					}
-					continue;
-				}
-				// simple value column
-				var alias = config.columnForPath(key.path, key.type);
-				if (!jsonPointer.has(obj, key.path) || typeof (jsonPointer.get(obj, key.path)) === 'undefined') {
+					// simple value column
+					var alias = config.columnForPath(key.path, key.type);
+					if (!jsonPointer.has(obj, key.path) || typeof (jsonPointer.get(obj, key.path)) === 'undefined') {
+						if (isKeyColumn && !forceInsert) {
+							missingKeyColumns.push(column);
+						} else {
+							updateObj[alias] = null;
+						}
+						continue;
+					}
+					var value = getParameterValue(remainderObject, key);
+					jsonPointer.set(remainderObject, key.path, undefined);
 					if (isKeyColumn && !forceInsert) {
-						missingKeyColumns.push(column);
+						var pair = mysql.escapeId(alias) + "=" + mysql.escape(value);
+						wherePairs.push(pair);
 					} else {
-						updateObj[alias] = null;
+						updateObj[alias] = value;
 					}
-					continue;
 				}
-				var value = getParameterValue(remainderObject, key);
-				jsonPointer.set(remainderObject, key.path, undefined);
-				if (isKeyColumn && !forceInsert) {
-					var pair = mysql.escapeId(alias) + "=" + mysql.escape(value);
-					wherePairs.push(pair);
-				} else {
-					updateObj[alias] = value;
+				return {
+					updateObj: updateObj,
+					wherePairs: wherePairs,
+					missingKeyColumns: missingKeyColumns
+				};
+			}
+			
+			if (!forceInsert) {
+				var writeParts = assembleUpdate(obj, config.writeColumns);
+
+				if (writeParts.missingKeyColumns.length === 0) {
+					var updatePairs = [];
+					for (var alias in writeParts.updateObj) {
+						updatePairs.push(mysql.escapeId(alias) + "=" + mysql.escape(writeParts.updateObj[alias]));
+					}
+					var sql = 'UPDATE ' + escapedTable + '\n\tSET ' + updatePairs.join(',\n\t') + '\nWHERE ' + writeParts.wherePairs.join(' AND ');
+					connection.query(sql, function (err, result) {
+						if (err) {
+							err.sqlQuery = sql;
+							return callback(err);
+						}
+						if (result.affectedRows || forceInsert === false) {
+							callback(null, result);
+						} else {
+							staticMethods.save.call(thisClass, connection, obj, true, callback);
+						}
+					});
+					return this;
 				}
 			}
-			if (missingKeyColumns.length === 0 && !forceInsert) {
-				var updatePairs = [];
-				for (var alias in updateObj) {
-					updatePairs.push(mysql.escapeId(alias) + "=" + mysql.escape(updateObj[alias]));
-				}
-				var sql = 'UPDATE ' + escapedTable + '\n\tSET ' + updatePairs.join(',\n\t') + '\nWHERE ' + wherePairs.join(' AND ');
-				connection.query(sql, function (err, result) {
-					if (err) {
-						err.sqlQuery = sql;
-						return callback(err);
-					}
-					if (result.affectedRows || forceInsert === false) {
-						callback(null, result);
-					} else {
-						staticMethods.save.call(thisClass, connection, obj, true, callback);
-					}
-				});
-			} else {
-				if (missingKeyColumns.length > 1) {
-					throw new Error('Cannot have more than one missing key column: ' + missingKeyColumns);
-				}
-				var keyColumn = null;
-				if (missingKeyColumns.length === 1) {
-					var keyColumn = config.deconstructColumn(missingKeyColumns[0]);
-					if (keyColumn.type !== 'integer' && keyColumn.type !== 'number') {
-						throw new Error('Missing key column must be number: ' + missingKeyColumns);
-					}
-				}
-				var insertColumns = [];
-				var insertValues = [];
-				for (var alias in updateObj) {
-					insertColumns.push(mysql.escapeId(alias));
-					insertValues.push(mysql.escape(updateObj[alias]));
-				}
-				var sql = 'INSERT INTO ' + escapedTable + ' (' + insertColumns.join(', ') + ') VALUES (\n\t' + insertValues.join(',\n\t') + ')';
-				connection.query(sql, function (err, result) {
-					if (err) {
-						err.sqlQuery = sql;
-						return callback(err);
-					}
-					if (keyColumn) {
-						jsonPointer.set(obj, keyColumn.path, result.insertId);
-					}
-					callback(null, result);
-				});
+			
+			var insertParts = assembleUpdate(obj, config.createColumns);
+
+			if (insertParts.missingKeyColumns.length > 1) {
+				throw new Error('Cannot have more than one missing key column: ' + insertParts.missingKeyColumns);
 			}
+			var keyColumn = null;
+			if (insertParts.missingKeyColumns.length === 1) {
+				var keyColumn = config.deconstructColumn(insertParts.missingKeyColumns[0]);
+				if (keyColumn.type !== 'integer' && keyColumn.type !== 'number') {
+					throw new Error('Missing key column must be number: ' + missingKeyColumns);
+				}
+			}
+
+			var insertColumns = [];
+			var insertValues = [];
+			for (var alias in insertParts.updateObj) {
+				insertColumns.push(mysql.escapeId(alias));
+				insertValues.push(mysql.escape(insertParts.updateObj[alias]));
+			}
+			var sql = 'INSERT INTO ' + escapedTable + ' (' + insertColumns.join(', ') + ') VALUES (\n\t' + insertValues.join(',\n\t') + ')';
+			connection.query(sql, function (err, result) {
+				if (err) {
+					err.sqlQuery = sql;
+					return callback(err);
+				}
+				if (keyColumn) {
+					jsonPointer.set(obj, keyColumn.path, result.insertId);
+				}
+				callback(null, result);
+			});
 			return this;
 		}),
 		remove: makePromiseCompatible(function (connection, obj, callback) {
