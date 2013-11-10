@@ -145,7 +145,11 @@ function createClass(config, constructor, proto) {
 
 	var NewClass;
 	if (constructor) {
-		NewClass = function () {
+		NewClass = function (model) {
+			for (var key in model) {
+				this[key] = model[key];
+			}
+			
 			var _super = {};
 			for (var key in proto) {
 				_super[key] = proto[key].bind(this);
@@ -158,7 +162,11 @@ function createClass(config, constructor, proto) {
 			return constructor.apply(this, args);
 		}
 	} else {
-		NewClass = function () {};
+		NewClass = function (model) {
+			for (var key in model) {
+				this[key] = model[key];
+			}
+		};
 	}
 	NewClass.prototype = proto || {};
 	
