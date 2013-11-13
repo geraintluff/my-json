@@ -460,7 +460,7 @@ function createClass(config, constructor, proto) {
 			if (insertParts.missingKeyColumns.length === 1) {
 				var keyColumn = config.deconstructColumn(insertParts.missingKeyColumns[0]);
 				if (keyColumn.type !== 'integer' && keyColumn.type !== 'number') {
-					throw new Error('Missing key column must be number: ' + missingKeyColumns);
+					throw new Error('Missing key column must be number: ' + insertParts.missingKeyColumns);
 				}
 			}
 
