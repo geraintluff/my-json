@@ -865,14 +865,14 @@ ClassGroup.prototype = {
 		var result = function () {
 			return thisGroup.cacheWithPool(mysqlPool);
 		};
+		result.classes = {};
 		function addClass(key) {
-			if (!result[key]) {
-				result[key] = function () {
-					var cachedGroup = result();
-					return cachedGroup[key];
-				};
-				result[key].className = key;
-			}
+			result.classes[key] = function () {
+				var cachedGroup = result();
+				return cachedGroup[key];
+			};
+			result.classes[key].className = key;
+			result[key] = result[key] || result.classes[key];
 		}
 		for (var key in this.classes) {
 			addClass(key);
@@ -880,20 +880,22 @@ ClassGroup.prototype = {
 		return result;
 	},
 	cacheWithPool: function (mysqlPool) {
-		var cached = {};
+		var cached = {classes: {}};
 		for (var key in this.classes) {
-			cached[key] = this[key].cacheWithPool(mysqlPool);
-			cached[key].group = cached;
-			cached[key].className = key;
+			cached.classes[key] = this[key].cacheWithPool(mysqlPool);
+			cached.classes[key].group = cached;
+			cached.classes[key].className = key;
+			cached[key] = cached[key] || cached.classes[key];
 		}
 		return cached;
 	},
 	cacheWith: function (connection) {
-		var cached = {};
+		var cached = {classes: {}};
 		for (var key in this.classes) {
-			cached[key] = this[key].cacheWith(connection);
-			cached[key].group = cached;
-			cached[key].className = key;
+			cached.classes[key] = this[key].cacheWith(connection);
+			cached.classes[key].group = cached;
+			cached.classes[key].className = key;
+			cached[key] = cached[key] || cached.classes[key];
 		}
 		return cached;
 	}
