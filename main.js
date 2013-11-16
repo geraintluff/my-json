@@ -853,16 +853,38 @@ function ClassGroup(configs) {
 	this.addClass = function (key, config) {
 		this[key] = this.classes[key] = createClass(config, config.extend);
 		this[key].pendingRequests = pendingRequests;
+		this[key].className = key;
 	};
 	for (var key in configs) {
 		this.addClass(key, configs[key]);
 	}
 }
 ClassGroup.prototype = {
+	withPool: function (mysqlPool) {
+		var thisGroup = this;
+		var result = function () {
+			return thisGroup.cacheWithPool(mysqlPool);
+		};
+		function addClass(key) {
+			if (!result[key]) {
+				result[key] = function () {
+					var cachedGroup = result();
+					return cachedGroup[key];
+				};
+				result[key].className = key;
+			}
+		}
+		for (var key in this.classes) {
+			addClass(key);
+		}
+		return result;
+	},
 	cacheWithPool: function (mysqlPool) {
 		var cached = {};
 		for (var key in this.classes) {
 			cached[key] = this[key].cacheWithPool(mysqlPool);
+			cached[key].group = cached;
+			cached[key].className = key;
 		}
 		return cached;
 	},
@@ -870,6 +892,8 @@ ClassGroup.prototype = {
 		var cached = {};
 		for (var key in this.classes) {
 			cached[key] = this[key].cacheWith(connection);
+			cached[key].group = cached;
+			cached[key].className = key;
 		}
 		return cached;
 	}
